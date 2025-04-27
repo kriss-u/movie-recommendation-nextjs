@@ -1,190 +1,308 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState } from "react";
+import useSWR from "swr";
+import { fetcher } from "@/utils/fetch";
 
-type Message = {
-  id: string;
-  role: "user" | "system";
-  content: string;
+// Types for LLM recommendations
+type Tag = string;
+type Genre = string;
+type ParsedRecommendation = {
+  title: string;
+  genres: Genre[];
+  tags: Tag[];
 };
 
-type ChatHistory = {
-  id: string;
+type LLMCandidate = {
   title: string;
-  updatedAt: Date;
+  genres: Genre[];
+  tags: Tag[];
+  rating: number | null;
+};
+
+type LLMResponse = {
+  user_input: string;
+  raw_recommendations: string;
+  parsed_recommendations: ParsedRecommendation[];
+  candidates: LLMCandidate[];
+};
+
+// Types for similarity-based recommendations
+type ConventionalRecommendation = {
+  movieId: number;
+  title: string;
+  genres: Genre[];
+  similarity_score: number;
+};
+
+type ConventionalRecommendationResponse = {
+  query: string;
+  recommendations: ConventionalRecommendation[];
 };
 
 export default function Home() {
-  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [chatHistories, setChatHistories] = useState<ChatHistory[]>([
-    {
-      id: "1",
-      title: "Movie recommendations for date night",
-      updatedAt: new Date(),
-    },
-    { id: "2", title: "Sci-fi movies from the 90s", updatedAt: new Date() },
-    { id: "3", title: "Best comedy movies of all time", updatedAt: new Date() },
-  ]);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchKey, setSearchKey] = useState<number>(0); // Key to force re-fetch
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  // Define custom fetchers for our POST requests
+  const llmFetcher = (url: string) =>
+    fetcher<LLMResponse>(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_input: searchQuery, top_n: 20 }),
+    });
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  const similarityFetcher = (url: string) =>
+    fetcher<ConventionalRecommendationResponse>(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: searchQuery, top_n: 20 }),
+    });
 
-  const handleSubmit = (e: React.FormEvent) => {
+  // Helper function to normalize titles for comparison
+  const cleanTitle = (title: string): string => {
+    // Remove year and normalize case for comparison
+    return title.replace(/\s*\(\d{4}\)$/, "").toLowerCase();
+  };
+
+  // Use SWR hooks with conditional fetching
+  const {
+    data: llmResults,
+    error: llmError,
+    isLoading: isLlmLoading,
+  } = useSWR<LLMResponse>(
+    searchQuery ? [`/recommend_llm`, searchKey] : null,
+    () => llmFetcher("/recommend_llm"),
+    { revalidateOnFocus: false }
+  );
+
+  const {
+    data: similarityResults,
+    error: similarityError,
+    isLoading: isSimilarityLoading,
+  } = useSWR<ConventionalRecommendationResponse>(
+    searchQuery ? [`/recommend`, searchKey] : null,
+    () => similarityFetcher("/recommend"),
+    { revalidateOnFocus: false }
+  );
+
+  // Derive loading and error states
+  const isLoading = isLlmLoading || isSimilarityLoading;
+  const hasError = llmError || similarityError;
+
+  // Calculate overlaps between recommendation sets
+  const overlaps = (() => {
+    if (
+      !llmResults?.parsed_recommendations ||
+      !similarityResults?.recommendations
+    ) {
+      return { count: 0, titles: [] };
+    }
+
+    const llmTitles = new Set(
+      llmResults.parsed_recommendations.map((item) => cleanTitle(item.title))
+    );
+
+    const similarityTitles = similarityResults.recommendations.map((item) =>
+      cleanTitle(item.title)
+    );
+    const overlappingTitles = similarityTitles.filter((title) =>
+      llmTitles.has(title)
+    );
+
+    return {
+      count: overlappingTitles.length,
+      titles: overlappingTitles,
+    };
+  })();
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim()) return;
 
-    // Add user message
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      role: "user",
-      content: input,
-    };
-
-    setMessages((prev) => [...prev, userMessage]);
-
-    // Simulate system response (in a real app, this would be an API call)
-    setTimeout(() => {
-      const systemMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "system",
-        content: `Based on your interest in "${input}", I recommend checking out these movies:\n\n1. The Shawshank Redemption (1994)\n2. Inception (2010)\n3. Interstellar (2014)`,
-      };
-      setMessages((prev) => [...prev, systemMessage]);
-    }, 1000);
-
-    setInput("");
+    // For new searches or repeated searches with the same query
+    setSearchQuery(input);
+    setSearchKey((prev) => prev + 1); // Increment to force re-fetch
   };
 
-  const startNewChat = () => {
-    setMessages([]);
-    // In a real app, you might create a new chat in the backend here
-    const newChat: ChatHistory = {
-      id: Date.now().toString(),
-      title: "New movie recommendations",
-      updatedAt: new Date(),
-    };
-    setChatHistories((prev) => [newChat, ...prev]);
+  const renderGenres = (genres: string[]) => (
+    <div className="flex flex-wrap gap-1 mt-1">
+      {genres.map((genre, idx) => (
+        <span
+          key={idx}
+          className="px-2 py-0.5 bg-gray-200 dark:bg-gray-700 rounded-full text-xs"
+        >
+          {genre}
+        </span>
+      ))}
+    </div>
+  );
+
+  const renderTags = (tags: string[]) => {
+    if (!tags || tags.length === 0) return null;
+
+    return (
+      <div className="flex flex-wrap gap-1 mt-1">
+        {tags.map((tag, idx) => (
+          <span
+            key={idx}
+            className="px-2 py-0.5 bg-blue-100 dark:bg-blue-900 rounded-full text-xs"
+          >
+            {tag}
+          </span>
+        ))}
+      </div>
+    );
+  };
+
+  const renderOverlaps = () => {
+    if (!overlaps || overlaps.count === 0) return null;
+
+    return (
+      <div className="p-4 bg-yellow-50 dark:bg-yellow-900/30 rounded-lg mb-4">
+        <h2 className="text-lg font-bold">Overlap Analysis</h2>
+        <p className="mb-2">
+          Found {overlaps.count} overlapping recommendations between systems.
+        </p>
+        {overlaps.titles.length > 0 && (
+          <div>
+            <p className="font-medium">Overlapping movies:</p>
+            <ul className="list-disc list-inside">
+              {overlaps.titles.map((title, idx) => (
+                <li key={idx} className="capitalize">
+                  {title}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    );
   };
 
   return (
-    <div className="flex h-screen overflow-hidden">
-      {/* Sidebar */}
-      <div
-        className={`${
-          sidebarOpen ? "w-64" : "w-0"
-        } bg-[#202123] text-white transition-all duration-300 flex flex-col overflow-hidden`}
-      >
-        <div className="p-4 border-b border-gray-700 flex items-center justify-between">
-          <div className="font-bold text-lg">Movie Recommender</div>
-        </div>
-
-        <button
-          onClick={startNewChat}
-          className="mx-4 my-3 p-3 border border-gray-600 rounded-md hover:bg-gray-700 transition-colors"
-        >
-          + New Chat
-        </button>
-
-        <div className="flex-grow overflow-y-auto">
-          {chatHistories.map((chat) => (
-            <div
-              key={chat.id}
-              className="px-4 py-3 hover:bg-gray-700 cursor-pointer"
-            >
-              <h3 className="text-sm font-medium truncate">{chat.title}</h3>
-              <p className="text-xs text-gray-400">
-                {chat.updatedAt.toLocaleDateString()}
-              </p>
-            </div>
-          ))}
-        </div>
-      </div>
+    <div className="flex flex-col h-screen overflow-hidden">
+      {/* Header */}
+      <header className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 p-4">
+        <h1 className="text-2xl font-bold text-center">Movie Recommender</h1>
+        <p className="text-center text-gray-600 dark:text-gray-400">
+          Compare LLM vs Similarity-based recommendations
+        </p>
+      </header>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col overflow-hidden">
-        {/* Top Navbar */}
-        <header className="flex items-center h-14 border-b border-gray-200 dark:border-gray-800 px-4">
-          <button
-            onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="p-1 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
-          >
-            <svg
-              className="w-6 h-6"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M4 6h16M4 12h16M4 18h16"
-              />
-            </svg>
-          </button>
-          <h1 className="ml-4 text-lg font-medium">Movie Recommender</h1>
-        </header>
-
-        {/* Chat Messages Area */}
-        <div className="flex-grow overflow-y-auto p-4">
-          {messages.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center">
-              <div className="text-4xl mb-6">🎬</div>
-              <h2 className="text-2xl font-bold mb-2">Movie Recommender AI</h2>
-              <p className="text-gray-500 dark:text-gray-400 text-center max-w-md">
-                Ask me about movie recommendations based on your mood,
-                preferences, or favorite genres.
-              </p>
-            </div>
-          ) : (
-            messages.map((message) => (
-              <div
-                key={message.id}
-                className={`mb-4 ${
-                  message.role === "user" ? "text-right" : ""
-                }`}
-              >
-                <div
-                  className={`inline-block rounded-lg px-4 py-2 max-w-[80%] ${
-                    message.role === "user"
-                      ? "bg-blue-500 text-white"
-                      : "bg-gray-200 dark:bg-gray-700 text-black dark:text-white"
-                  }`}
-                >
-                  <pre className="whitespace-pre-wrap font-sans">
-                    {message.content}
-                  </pre>
-                </div>
-              </div>
-            ))
-          )}
-          <div ref={messagesEndRef} />
-        </div>
-
-        {/* Chat Input Area */}
-        <div className="p-4 border-t border-gray-200 dark:border-gray-800">
-          <form onSubmit={handleSubmit} className="flex">
+      <div className="flex-grow overflow-y-auto p-4">
+        {/* Search Form */}
+        <form onSubmit={handleSubmit} className="max-w-2xl mx-auto mb-6">
+          <div className="flex">
             <input
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask for movie recommendations..."
-              className="flex-grow p-2 border border-gray-300 dark:border-gray-600 rounded-l-md bg-white dark:bg-gray-800"
+              placeholder="E.g., Suggest me horror comedy from 2000s"
+              className="flex-grow p-3 border border-gray-300 dark:border-gray-600 rounded-l-md bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              disabled={isLoading}
             />
             <button
               type="submit"
-              className="px-4 py-2 bg-blue-500 text-white rounded-r-md hover:bg-blue-600"
+              className={`px-6 py-3 bg-blue-600 text-white rounded-r-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-blue-400`}
+              disabled={isLoading}
             >
-              Send
+              {isLoading ? "Searching..." : "Search"}
             </button>
-          </form>
-        </div>
+          </div>
+        </form>
+
+        {/* Error State */}
+        {hasError && (
+          <div className="p-4 bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300 rounded-lg mb-4 max-w-2xl mx-auto">
+            <h3 className="font-bold">Error fetching recommendations</h3>
+            <p>
+              There was a problem processing your request. Please try again.
+            </p>
+          </div>
+        )}
+
+        {/* Loading State */}
+        {isLoading && (
+          <div className="flex justify-center my-12">
+            <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
+          </div>
+        )}
+
+        {/* Results Section */}
+        {!isLoading && !hasError && (llmResults || similarityResults) && (
+          <div>
+            {/* Overlap Analysis */}
+            {renderOverlaps()}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* LLM Results */}
+              <div className="border border-gray-200 dark:border-gray-800 rounded-lg overflow-hidden">
+                <div className="bg-blue-50 dark:bg-blue-900/30 p-3 border-b border-gray-200 dark:border-gray-800">
+                  <h2 className="font-bold">LLM Recommendations</h2>
+                </div>
+                <div className="divide-y divide-gray-200 dark:divide-gray-800">
+                  {llmResults?.parsed_recommendations.map((movie, idx) => (
+                    <div
+                      key={idx}
+                      className={`p-3 hover:bg-gray-50 dark:hover:bg-gray-800/50 ${
+                        overlaps.titles.includes(cleanTitle(movie.title))
+                          ? "bg-yellow-50 dark:bg-yellow-900/20"
+                          : ""
+                      }`}
+                    >
+                      <h3 className="font-medium">{movie.title}</h3>
+                      {renderGenres(movie.genres)}
+                      {renderTags(movie.tags)}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Similarity Results */}
+              <div className="border border-gray-200 dark:border-gray-800 rounded-lg overflow-hidden">
+                <div className="bg-green-50 dark:bg-green-900/30 p-3 border-b border-gray-200 dark:border-gray-800">
+                  <h2 className="font-bold">Conventional Recommendations</h2>
+                </div>
+                <div className="divide-y divide-gray-200 dark:divide-gray-800">
+                  {similarityResults?.recommendations.map((movie, idx) => (
+                    <div
+                      key={idx}
+                      className={`p-3 hover:bg-gray-50 dark:hover:bg-gray-800/50 ${
+                        overlaps.titles.includes(cleanTitle(movie.title))
+                          ? "bg-yellow-50 dark:bg-yellow-900/20"
+                          : ""
+                      }`}
+                    >
+                      <h3 className="font-medium">{movie.title}</h3>
+                      {renderGenres(movie.genres)}
+                      <div className="mt-1 text-xs text-gray-500">
+                        Similarity: {(movie.similarity_score * 100).toFixed(1)}%
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Initial State - Empty */}
+        {!isLoading && !hasError && !llmResults && !similarityResults && (
+          <div className="text-center py-16">
+            <div className="text-6xl mb-4">🎬</div>
+            <h2 className="text-2xl font-bold mb-2">
+              Movie Recommendation Comparison
+            </h2>
+            <p className="text-gray-500 dark:text-gray-400 max-w-lg mx-auto">
+              Enter a query about movies you&apos;re interested in, and
+              we&apos;ll show you recommendations from both our LLM-based system
+              and our conventional recommendation algorithm.
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );
